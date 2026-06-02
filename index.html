@@ -120,6 +120,11 @@
   .cleartime{background:transparent;border:none;color:var(--muted);cursor:pointer;font-size:18px;padding:4px 6px}
   .manage{margin-top:12px;padding:14px;border:1px solid var(--line);border-radius:13px;background:#0d0f0d;animation:pop .2s ease}
   .manage.hide{display:none}
+  .mhead{display:flex;align-items:center;justify-content:space-between;margin-bottom:11px}
+  .mclose{flex:none;width:32px;height:32px;border-radius:8px;border:1px solid var(--line);background:transparent;color:var(--muted);font-size:20px;line-height:1;cursor:pointer;transition:.15s}
+  .mclose:active{color:var(--ink);border-color:#3a3f38}
+  .mdone{width:100%;margin-top:14px;background:transparent;border:1px solid rgba(198,241,53,.4);color:var(--acid);font-family:"Noto Sans TC",sans-serif;font-size:14px;font-weight:700;padding:11px;border-radius:9px;cursor:pointer;transition:.15s}
+  .mdone:active{background:rgba(198,241,53,.1)}
   .mlabel{font-family:"IBM Plex Mono",monospace;font-size:10.5px;letter-spacing:.16em;text-transform:uppercase;color:var(--muted);margin:0 0 9px}
   .trows{display:flex;flex-direction:column;gap:8px;margin-bottom:16px}
   .trow{display:flex;align-items:center;gap:9px}
@@ -195,18 +200,23 @@ const DEFAULT_CATS=[
   {id:"self",label:"個人",color:"#ffd84d"}];
 const PALETTE=["#c6f135","#ff8a3d","#5ad1ff","#e07cff","#ffd84d","#ff5a7d","#5affb0","#a78bfa","#ffffff","#9aa399"];
 let ideas=[],cats=[],activeCat="idea",filter="all",manageOpen=false,syncOpen=false,newColor="#c6f135";
+let tomb={}; // 刪除墓碑：{ id: 刪除時間戳 } 防止刪掉的項目在合併時復活
+const TOMB_TTL=30*864e5; // 墓碑保留 30 天後自動清掉
 let SYNC_URL=localStorage.getItem(URLKEY)||"", pushTimer=null;
 const catOf=id=>cats.find(c=>c.id===id)||{id:"_none",label:"未分類",color:"#5a5f57"};
+function markDeleted(id){ tomb[id]=Date.now(); }
+function pruneTomb(){ const now=Date.now(); for(const k in tomb){ if(now-tomb[k]>TOMB_TTL) delete tomb[k]; } }
 
 // ---- local storage ----
 function loadLocal(){
   let raw=null; try{const s=localStorage.getItem(KEY);raw=s?JSON.parse(s):null;}catch(e){raw=null;}
-  if(Array.isArray(raw)){ideas=raw;cats=DEFAULT_CATS.slice();}
-  else if(raw&&typeof raw==="object"){ideas=raw.ideas||[];cats=(raw.cats&&raw.cats.length)?raw.cats:DEFAULT_CATS.slice();}
-  else{ideas=[];cats=DEFAULT_CATS.slice();}
+  if(Array.isArray(raw)){ideas=raw;cats=DEFAULT_CATS.slice();tomb={};}
+  else if(raw&&typeof raw==="object"){ideas=raw.ideas||[];cats=(raw.cats&&raw.cats.length)?raw.cats:DEFAULT_CATS.slice();tomb=raw.tomb||{};}
+  else{ideas=[];cats=DEFAULT_CATS.slice();tomb={};}
+  pruneTomb();
   if(!cats.some(c=>c.id===activeCat))activeCat=cats[0]?.id||"idea";
 }
-function saveLocal(){try{localStorage.setItem(KEY,JSON.stringify({ideas,cats}));}catch(e){toast("本機儲存失敗");}}
+function saveLocal(){try{localStorage.setItem(KEY,JSON.stringify({ideas,cats,tomb}));}catch(e){toast("本機儲存失敗");}}
 function save(){saveLocal(); if(SYNC_URL) queuePush();}
 
 // ---- sync ----
@@ -227,9 +237,12 @@ async function pull(){
   try{
     const r=await fetch(SYNC_URL,{method:"GET"}); const d=await r.json(); if(!d.ok)throw 0;
     if(d.cats&&d.cats.length)cats=d.cats;
-    ideas=(d.ideas||[]).map(mapIn);
+    pruneTomb();
+    ideas=(d.ideas||[]).map(mapIn).filter(i=>!tomb[i.id]); // 排除已刪除的
     if(!cats.some(c=>c.id===activeCat))activeCat=cats[0]?.id||"idea";
     saveLocal(); renderChips();renderFilters();renderList(); setBadge("ok");
+    // 若雲端還留著被刪掉的項目，回推一次把它清乾淨
+    if((d.ideas||[]).some(x=>tomb[x.id])) push();
   }catch(e){setBadge("error");}
 }
 async function push(){
@@ -250,14 +263,17 @@ async function initSync(){
   try{
     const r=await fetch(SYNC_URL,{method:"GET"}); const d=await r.json(); if(!d.ok)throw 0;
     if(d.cats&&d.cats.length)cats=d.cats;
-    const server=(d.ideas||[]).map(mapIn), byId={}; server.forEach(s=>byId[s.id]=s);
+    pruneTomb();
+    // 雲端項目：排除掉本機標記為已刪除的
+    const server=(d.ideas||[]).map(mapIn).filter(s=>!tomb[s.id]);
+    const byId={}; server.forEach(s=>byId[s.id]=s);
     const merged=server.slice();
-    // 保留本機才有的項目（離線新增、尚未上傳）
-    ideas.forEach(loc=>{ if(!byId[loc.id]) merged.unshift(loc); });
+    // 只補回「本機有、雲端沒有、且不是被刪掉」的項目（真正離線新增的）
+    ideas.forEach(loc=>{ if(!byId[loc.id] && !tomb[loc.id]) merged.unshift(loc); });
     ideas=merged;
     if(!cats.some(c=>c.id===activeCat))activeCat=cats[0]?.id||"idea";
     saveLocal(); renderChips();renderFilters();renderList(); setBadge("ok");
-    push(); // 把本機才有的補上去
+    push(); // 把本機變更（含刪除）回推，讓 Sheet 與本機一致
   }catch(e){setBadge("error");}
 }
 
@@ -283,7 +299,7 @@ function renderManage(){
   if(!manageOpen){box.classList.add("hide");return;} box.classList.remove("hide");
   const rows=cats.map(c=>`<div class="trow" data-id="${c.id}"><span class="dot" style="background:${c.color}"></span><input class="tname" value="${esc(c.label)}" maxlength="12" data-act="rename"><input type="color" class="tcolor" value="${c.color}" data-act="recolor"><button class="trow-del" data-act="delcat" ${cats.length<=1?'disabled':''}>×</button></div>`).join("");
   const sw=PALETTE.map(col=>`<button class="sw ${col===newColor?'on':''}" data-col="${col}" style="background:${col}"></button>`).join("");
-  box.innerHTML=`<div class="mlabel">現有標籤</div><div class="trows">${rows}</div><div class="mlabel">新增標籤</div><div class="addtag"><span class="dot" style="background:${newColor}"></span><input id="newName" class="tname" placeholder="標籤名稱…" maxlength="12"><button class="addtag-btn" id="addCatBtn">＋ 新增</button></div><div class="swatches">${sw}</div>`;
+  box.innerHTML=`<div class="mhead"><span class="mlabel" style="margin:0">管理標籤</span><button class="mclose" id="manageClose" title="收起">×</button></div><div class="mlabel">現有標籤</div><div class="trows">${rows}</div><div class="mlabel">新增標籤</div><div class="addtag"><span class="dot" style="background:${newColor}"></span><input id="newName" class="tname" placeholder="標籤名稱…" maxlength="12"><button class="addtag-btn" id="addCatBtn">＋ 新增</button></div><div class="swatches">${sw}</div><button class="mdone" id="manageDone">完成</button>`;
 }
 function renderFilters(){
   const all=[{id:"all",label:"全部"},...cats,{id:"done",label:"已完成"}];
@@ -310,7 +326,7 @@ function add(){
   ta.value="";ta.style.height="auto";resetTime();renderList();save();ta.focus();
 }
 function toggle(id){const it=ideas.find(i=>i.id===id);if(it){it.done=!it.done;renderList();save();}}
-function del(id){ideas=ideas.filter(i=>i.id!==id);renderList();save();}
+function del(id){markDeleted(id);ideas=ideas.filter(i=>i.id!==id);renderList();save();}
 function editItem(el,id){
   const it=ideas.find(i=>i.id===id);if(!it)return;
   const ta=document.createElement("textarea");ta.className="edit";ta.value=it.text;ta.rows=1;
@@ -354,6 +370,7 @@ timeToggle.addEventListener("click",()=>{timeToggle.classList.add("hide");dueInp
 clearTime.addEventListener("click",resetTime);
 document.getElementById("chips").addEventListener("click",e=>{const b=e.target.closest(".chip");if(!b)return;if(b.dataset.cat==="__manage"){manageOpen=!manageOpen;renderChips();return;}activeCat=b.dataset.cat;renderChips();input.focus();});
 document.getElementById("manage").addEventListener("click",e=>{
+  if(e.target.id==="manageClose"||e.target.id==="manageDone"){manageOpen=false;renderChips();return;}
   if(e.target.id==="addCatBtn"){addCat();return;}
   if(e.target.classList.contains("sw")){newColor=e.target.dataset.col;renderManage();const n=document.getElementById("newName");if(n)n.focus();return;}
   const t=e.target.closest("[data-act]");if(!t)return;const row=e.target.closest(".trow"),id=row?.dataset.id;
@@ -368,8 +385,8 @@ document.getElementById("manage").addEventListener("keydown",e=>{if(e.target.id=
 document.getElementById("filters").addEventListener("click",e=>{const b=e.target.closest(".fbtn");if(!b)return;filter=b.dataset.f;renderFilters();renderList();});
 document.getElementById("list").addEventListener("click",e=>{const item=e.target.closest(".item");if(!item)return;const id=item.dataset.id,act=e.target.closest("[data-act]")?.dataset.act;if(act==="toggle")toggle(id);else if(act==="del")del(id);});
 document.getElementById("list").addEventListener("dblclick",e=>{const t=e.target.closest('[data-act="edit"]');if(t)editItem(t,t.closest(".item").dataset.id);});
-document.getElementById("clearDone").addEventListener("click",()=>{if(!ideas.some(i=>i.done))return;ideas=ideas.filter(i=>!i.done);renderList();save();});
-document.getElementById("resetAll").addEventListener("click",()=>{if(!ideas.length)return;if(confirm("確定要清空全部項目嗎？此動作無法復原。建議先匯出備份。")){ideas=[];renderList();save();}});
+document.getElementById("clearDone").addEventListener("click",()=>{if(!ideas.some(i=>i.done))return;ideas.filter(i=>i.done).forEach(i=>markDeleted(i.id));ideas=ideas.filter(i=>!i.done);renderList();save();});
+document.getElementById("resetAll").addEventListener("click",()=>{if(!ideas.length)return;if(confirm("確定要清空全部項目嗎？此動作無法復原。建議先匯出備份。")){ideas.forEach(i=>markDeleted(i.id));ideas=[];renderList();save();}});
 document.getElementById("exportBtn").addEventListener("click",exportData);
 document.getElementById("importBtn").addEventListener("click",()=>document.getElementById("importFile").click());
 document.getElementById("importFile").addEventListener("change",e=>{if(e.target.files[0])importData(e.target.files[0]);e.target.value="";});

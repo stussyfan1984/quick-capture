@@ -1,5 +1,5 @@
 // 靈感速記 PWA — offline cache
-const CACHE = "quick-capture-v2";
+const CACHE = "quick-capture-v4";
 const ASSETS = [
   "./",
   "./index.html",
